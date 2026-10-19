@@ -1,0 +1,27 @@
+[project]
+name = "video-bg-remover"
+version = "0.1.0"
+description = "Video background removal with BiRefNet, composited on a studio backdrop"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.7",  # 2.7+ ships CUDA 12.8 wheels, needed for Blackwell GPUs
+    "torchvision",
+    "numpy",
+    "transformers>=4.45",
+    "timm",
+    "kornia",
+    "einops",
+]
+
+[project.optional-dependencies]
+sam = ["sam-2 @ git+https://github.com/facebookresearch/sam2.git"]
+
+[tool.uv]
+package = false
+
+[tool.uv.extra-build-dependencies]
+sam-2 = ["torch>=2.7", "setuptools", "numpy"]
+
+[tool.uv.extra-build-variables]
+sam-2 = { SAM2_BUILD_CUDA = "0" }  # skip the optional CUDA extension; SAM 2 runs without it

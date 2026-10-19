@@ -1,9 +1,9 @@
-__pycache__/
-.venv/
-*.pt
-*.npy
+*.jpg
+*.mkv
 *.mov
 *.mp4
-*.mkv
-*.jpg
+*.npy
 *.png
+*.pt
+__pycache__/
+.venv/

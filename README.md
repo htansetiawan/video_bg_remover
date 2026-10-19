@@ -1,65 +1,77 @@
 # video_bg_remover
 
-Remove the background from a video with [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) (MIT) and put the
-subject on a clean studio backdrop. Built for musician/tutorial footage where the subject is a person *and* an
-object (a violin and bow), which person-only matting models such as RobustVideoMatting drop.
+Remove a video's background with [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) (MIT) and put the subject on a
+studio backdrop. It keeps people *and* what they hold (instruments, props), which person-only matting models drop.
+Frames stream ffmpeg → GPU → ffmpeg in memory, and audio is copied through.
 
-Frames are streamed ffmpeg → GPU → ffmpeg in memory, so there is no frame dump and reassembly. Audio is copied
-through.
+## Requirements
 
-## Outputs
+- An NVIDIA GPU. Tested on an RTX PRO 5000 Blackwell (48 GB). The default torch wheels need a recent driver
+  (580+ for CUDA 13).
+- `ffmpeg` built with `prores_ks` and `libx264`
+- [uv](https://docs.astral.sh/uv/)
 
-- **ProRes 4444 with alpha** (`.mov`), to put your own background under in an editor such as Final Cut Pro.
-- **H.264 on a studio backdrop** (`.mp4`), a warm off-white sweep with a soft vignette (colours are configurable).
-
-## Setup
-
-Needs an NVIDIA GPU, ffmpeg with `prores_ks` and `libx264`, and Python 3.10+.
+## Quickstart
 
 ```bash
-uv venv && uv pip install -r requirements.txt
+git clone https://github.com/htansetiawan/video_bg_remover && cd video_bg_remover
+uv sync
+
+# segment: writes a transparent ProRes 4444 .mov plus a studio-backdrop .mp4
+uv run remove_bg.py input.mov --alpha out_alpha.mov --studio out_studio.mp4
+
+# re-composite without re-running the model (new colours, bottom band, ...)
+uv run composite.py out_alpha.mov --studio out_band.mp4 --band 0.80 0.90 --audio input.mov
 ```
 
-The model weights download from Hugging Face on first run. BiRefNet loads with `trust_remote_code=True`.
+BiRefNet's weights download from Hugging Face on first run (`trust_remote_code=True`). A 540×960 clip runs at
+about 15 fps.
 
-## Usage
+## Options
 
-```bash
-# 1. segment (the slow step, ~15 fps for 540x960 on an RTX PRO 5000)
-python remove_bg.py in.mov --alpha out_alpha.mov --studio out_studio.mp4
+| Script | Flag | Default | What it does |
+|---|---|---|---|
+| `remove_bg.py` | `--alpha` | required | ProRes 4444 with alpha, for an editor (Final Cut, Premiere, Resolve) |
+| | `--studio` | none | H.264 composited on the studio backdrop |
+| | `--model` | `ZhengPeng7/BiRefNet` | `ZhengPeng7/BiRefNet_HR` infers at 2048px; only worth it for sources above about 1K |
+| | `--ema` | `0.25` | blends each frame's mask with the previous one to reduce flicker |
+| | `--limit` | `0` (all) | process only the first N frames; use this to test |
+| `composite.py` | `--band START END` | none | fades back to the original frame over that height range (0 = top) |
+| | `--inner` / `--outer` | `#f6f1e8` / `#dacfbe` | backdrop colour at the centre and at the edges |
+| | `--alpha` | none | also write ProRes with the band made opaque |
+| | `--audio` | alpha input | where to take the audio from |
 
-# 2. optional: re-composite without re-running the model, e.g. other colours,
-#    or keep the original room in the bottom band
-python composite.py out_alpha.mov --studio out_band.mp4 --band 0.80 0.90 --audio in.mov
-```
+## Edge flicker
 
-`--model ZhengPeng7/BiRefNet_HR` infers at 2048px. It only helps for sources larger than about 1K. On a
-540×960 phone clip it was worse, keeping patches of a pink bedsheet that the standard model dropped.
+BiRefNet looks at each frame on its own. Background that looks like the subject and touches it, such as a bed
+under the player's arm, gets included on some frames and not others. `--band 0.80 0.90` shows the original room
+in the bottom of the frame, so any leak sits over the real background and can't be seen. Colour-keying the leak
+fails when it shares the skin's hue.
 
-## Flicker near the frame edge
+## For coding agents
 
-BiRefNet works on each frame on its own. When background that looks like the subject touches it (a bed under
-the player's arm, for example), the model includes it on some frames and not others, so it flickers.
-`remove_bg.py` smooths the alpha lightly over time (`--ema`), but that cannot fix a whole patch switching on
-and off.
+To rerun on a new video:
 
-`composite.py --band START END` fades the backdrop back to the original frame over that range of the frame
-height (0 = top). Inside the band any leaked pixels sit over the real background, so the flicker can't be seen.
+1. `uv sync`, then run `ffprobe input.mov` to check resolution, rotation and frame count.
+2. Test on a short piece first: `uv run remove_bg.py input.mov --alpha t_alpha.mov --studio t.mp4 --limit 150`.
+3. Grab frames to look at:
+   `ffmpeg -ss 2 -i t.mp4 -frames:v 1 check.png`. Check thin objects (bows, hair, fingers) and the frame edges.
+4. Run the whole video. It is long, so use `tmux new -d -s bg '…'` so it survives the session ending.
+5. If background flickers near one edge, re-run only `composite.py` with `--band`. It needs no GPU inference and
+   takes a few minutes. Don't re-run `remove_bg.py`.
 
-A colour key on the leaking background does not work when it shares the skin's hue. Here the pink bedsheet
-measured 5–20° hue and the skin 5–25°, so keying the sheet would also remove fingers.
+`common.py` holds the shared ffmpeg encoders and the backdrop. Outputs go wherever you point them, and
+`.gitignore` excludes media files.
 
 ## Experimental: SAM 2.1 gating
 
-`experimental/` tracks the subject with [SAM 2.1](https://github.com/facebookresearch/sam2) (Apache 2.0). The
-tracked mask then gates BiRefNet's alpha: SAM decides what counts as the subject and BiRefNet supplies the edges.
-
 ```bash
-pip install "git+https://github.com/facebookresearch/sam2.git"
+uv sync --extra sam
 curl -LO https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
-python experimental/sam_track.py in.mov out_alpha.mov --ckpt sam2.1_hiera_large.pt --work /tmp/sam_work
-python experimental/sam_gate.py out_alpha.mov /tmp/sam_work/masks.npy --studio gated.mp4 --audio in.mov
+uv run experimental/sam_track.py input.mov out_alpha.mov --ckpt sam2.1_hiera_large.pt --work /tmp/sam_work
+uv run experimental/sam_gate.py out_alpha.mov /tmp/sam_work/masks.npy --studio gated.mp4 --audio input.mov
 ```
 
-Status: this did not work on the footage it was tried on. Seeded once from frame 0, where the violin is held
-upright, SAM lost it once the video moved to horizontal close-ups. It would need prompts at keyframes.
+This tracks the subject with SAM 2.1 and uses the tracked mask to gate BiRefNet. It did **not** work on the
+footage it was tried on. Seeded once at frame 0, it lost a violin that went from upright to horizontal close-ups.
+It would need prompts at keyframes.
